@@ -1,0 +1,356 @@
+---
+title: "Production Function- Problem Set"
+author: "Aastha"
+date: "4/1/2020"
+output: html_document
+---
+
+title: "PS_Production function"
+author: "Aastha"
+date: "3/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+``` {r, echo=FALSE, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(readr)
+library(ks)
+library(kdensity)
+library(data.table)
+library(fitdistrplus)
+library(ggplot2)
+library(gridExtra)
+library(ggpubr)
+library(dvmisc)
+library(polywog)
+library(splines)
+library(freeknotsplines)
+library(foreign)
+library(MatchIt)
+library(dplyr)
+library(cem)
+library(jtools)
+#library(rstatix)
+library(haven)
+library(Hmisc)
+setwd("~/github/grad-IO/PS - production functions")
+
+```
+
+Preparing the data
+
+``` {r, message = FALSE, warning = FALSE}
+data <- read_dta("firms-cleaned.dta")
+y <- log(data$routputva)
+k <- log(data$rcapn)
+l <- log(data$worker)
+i <- log(data$rinv)
+mean_y <- mean(y)
+mean_k <- mean(k)
+mean_l <- mean(l)
+mean_i <- mean(i)
+y_d <- y - mean_y
+k_d <- k - mean_k
+l_d <- l - mean_l
+i_d <- i - mean_i
+```
+
+Assuming a cobb-douglas production function, we have:
+
+y_it = alpha_l* l_it + alpha_k* k_it + omega_it + e_it
+
+Ques 1: OLS regression to find output elasticities, assuming a cobb douglas production function:
+
+``` {r,  message = FALSE, warning = FALSE}
+#describe(data)
+ols <- lm(y_d ~ l_d + k_d - 1)
+summ(ols)
+```
+
+y_it = alpha_l* l_it + alpha_k* k_it + omega_it + e_it
+
+The output elasticity with respect to labor is 0.89 and with respect to capital is 0.26, without intercept. The simultaneity problem in the estimation of a PF establishes that if the unobserved productivity !it is known to the firm when it decides the amount of inputs to use in production (kit; lit), then these observed inputs should be correlated with the unobservable omega_it and the OLS estimator of alpha_L and alpha_K will be biased. It
+is clear that in this case ignoring the endogeneity of inputs can generate a serious in the
+estimation of the PF parameters.
+
+
+Ques 2: Output elasticities using firm fixed effects in linear regression:
+
+
+
+``` {r, message = FALSE, warning = FALSE}
+library(plm)
+fe <- plm(y_d ~ l_d + k_d, data = data, index=c("firm", "year"), model="within")
+summary(fe)
+#fixef(fe)
+pFtest(fe, ols) # fixed effects is a better choice
+
+```
+y_it = alpha_l*l_it + alpha_k*k_it + omega_it + e_it
+
+We get alphaL = 0.56 and alphaK = 0.09, and the results are significantly different from the regression without fixed effects in question 1. Under the assumptions of Mundlak (1961) and Mundlak and Hoch (1965), the only endogenous component of the error term is the fixed e¤ect eta_i. The transitory shocks omega*_it and e_it do not induce any endogeneity problem(like the model above). The WG transformation removes the fixed effect eta_i. However, it is very common to find that the WGE estimator provides very small estimates of alphaL and alphaK, notice that the estimates in this question are much smaller than question 1. Also, as has been pointed out, the bias induced by measurement-error in the regressors can be exacer-
+bated by the WG transformation, which is highly likely in this data set. It has been shown that within-group transformation caused a significantly downward biased estimators.
+
+
+
+
+
+
+
+
+Ques 3: Olley Pakes methodology to estimate output elasticities:
+
+
+``` {r, message = FALSE, warning = FALSE}
+
+
+# first stage regression:
+# Let the function phi(k_t, i_t) be a polynomial of capital and investment
+
+data2 <- cbind(data, l, k, y, i)
+
+
+data.nm <- data2[ !is.na(data2$k | data2$i) & ( data2$i > 0) & !is.nan(data2$i) & !is.infinite(data2$i)  , ]
+# Now estimating the first step,
+
+op1 <- lm(y ~ l + poly(cbind(i,k), degree = 4)*factor(year), data = data.nm)
+#op1
+
+#get fhat
+b1 <-op1$coefficients[c("l") ]
+b1
+xb1 <- (as.matrix(data.nm [,c("l") ]) ) %*% b1
+fhat <- predict (op1,data.nm ) - xb1
+
+#I now create a function to lag fhat and capital
+lag <- function (x , j=data.nm$firm , t=data.nm$year) {
+  if (length(j) != length(x) || length(j) != length(t) ) {
+    stop (" Inputs not same length ")
+  }
+  x.lag <- x [1:(length(x)-1)]
+  x.lag [j[1:(length(j)-1) ]!= j[2:length(j)]] <- NA
+  x.lag [t [1:(length (j)-1)]+1 !=t[2:length(j)]] <- NA
+  return(c(NA,x.lag))
+}
+
+
+
+```
+
+
+step 2 regression for OP
+
+``` {r, echo=FALSE, message = FALSE, warning = FALSE}
+#making data frame for step 2 regression
+data.step2 <- data.frame(lhs=((data.nm$y)-xb1),
+                       k =data.nm$k,fhat =fhat ,
+                       k.lag = lag(data.nm$k),
+                       f.lag =lag(fhat))
+
+# dropping missing observations 
+data.step2 <- subset(data.step2, !apply(data.step2, 1,function (x)  any (is.na(x))))
+## only 414 observations are left.
+
+# objective function = sum of residuals ^2
+objective <- function(betaK, degree =4) {
+  op2 <- lm(I(lhs - betaK*k) ~ poly(I(f.lag - betaK*k.lag),degree),
+            data =data.step2 )
+  return(sum(residuals(op2)^2))
+}
+
+
+#minimize objective fucntion w.r.t betaK
+#first let's plot and check the shape
+library(ggplot2)
+fig.df <- data.frame(bk=seq(from=-0.02,to =0.3,by =0.005))
+fig.df$obj <- sapply(fig.df$bk ,objective)
+ggplot(fig.df,aes(bk,obj))+geom_point()
+
+
+#I minimize the objective using optim with betaK guess being 0.49 (OLS est)
+opt.out <- optim (0.49,fn=objective, method="Brent",lower =-1, upper =1)
+betaK <- opt.out$par
+betaK
+
+```
+Olley and Pakes (1996) propose a control function approach to estimate PFs. we get alpha_l = 0.86 and alpha_K = 0.28. A lot of data had been dropped to implement the Olley Pakes methodology to use investment as a proxy. Literature has shown investment is “lumpy”, hence its use can be problematic. Olley-Pakes method deals both with the simultaneity problem and with the selection problem due to endogenous exit.This method is a control function method. Instead of instrumenting the endogenous regressors, we include additional regressors that capture the endogenous part of the error term (i.e., proxy for the productivity shock). By including a flexible function in (l_i,t-1; k_it; i_it), we control for the unobservable omega_it. Therefore, alpha_L is identified if given (l_{i,t-1}, k_it; i_it) there is enough cross-sectional variation left in l_it. ACF critique is that in the regression in step 1,
+yit = alphaL *lit + phi_t(l_{i,t-1}; k_it; i_it) + e_it, it should not be possible to identify alphaL becuase the regressor l_it does not have any sample variability that is independent of the other regressors
+(l_{i,t-1}; k_it; i_it).
+
+
+Ques 4: Levinshon and Petrin Approach to measure output elasticities.
+
+Stage 1:
+
+``` {r, message = FALSE, warning = FALSE}
+m <- log(data$rmata)
+y2 <- log(data$routput)
+data3 <- cbind(data2, m, y2)
+#I will be using poly() function for first stage regression
+#therefore I am getting rid of missing values (if any)
+
+data.nm.lp <- data3[ !is.na(data3$k | data3$m) & ( data3$m > 0) & !is.nan(data3$m) & !is.infinite(data3$m)  , ]
+#first stage regression
+lp1 <- lm(y2 ~ l + poly (cbind(k,m), degree=4)*factor(year), data=data.nm.lp)
+
+#get fhat
+b1 <-lp1$coefficients[c("l") ]
+#b1
+xb1 <- (as.matrix(data.nm.lp [,c("l") ]) ) %*% b1
+fhat <- predict (lp1,data.nm.lp ) - xb1
+
+#I now create a function to lag fhat and capital
+lag <- function (x , j=data.nm.lp$firm , t=data.nm.lp$year) {
+  if (length(j) != length(x) || length(j) != length(t) ) {
+    stop (" Inputs not same length ")
+  }
+  x.lag <- x [1:(length(x)-1)]
+  x.lag [j[1:(length(j)-1) ]!= j[2:length(j)]] <- NA
+  x.lag [t [1:(length (j)-1)]+1 !=t[2:length(j)]] <- NA
+  return(c(NA,x.lag))
+}
+
+#making data frame for step 2 regression
+data.step2.lp <- data.frame(lhs=((data.nm.lp$y2)-xb1),
+                       m=data.nm.lp$m, k =data.nm.lp$k,fhat =fhat ,
+                       k.lag = lag(data.nm.lp$k),
+                       m.lag = lag(data.nm.lp$m),
+                       f.lag =lag(fhat))
+
+
+# dropping missing observations because I am gonna use poly ()
+data.step2.lp <- subset(data.step2.lp, !apply(data.step2.lp, 1,function (x)  any (is.na(x))))
+
+
+# objective function = sum of residuals ^2
+objective <- function(betaK.lp, degree =4) {
+  lp2 <- lm(I(lhs - betaK.lp[1]*k -betaK.lp[2]*m) ~ poly(I(f.lag - betaK.lp[1]*k.lag - betaK.lp[2]*m.lag),degree),
+            data =data.step2.lp )
+  return(sum(residuals(lp2)^2))
+}
+
+
+#minimize objective fucntion w.r.t betaK (it is essentialy a non-linear GMM)
+
+opt.out <- optim (c(0.49,0.49) ,objective)
+betaK.lp <- opt.out$par
+#betaK.lp
+```
+Levinshon and Petrin (2003) have extended Olley-Pakes approach to contexts where data on capital investment presents significant censoring at zero investment.The estimates from this method are, alphaL = 0.425, alphaK = 0.19 and alphaM = 0.66. SImilar to the critique about the O-P method there is identification problem in LP method as well, as pointed out by ACF.In summary, the LP approach is a similar approach to OP, but invert an intermediate input demand function instead of an investment demand function to control for the unobserved productivity shock.
+
+
+
+Estimates of output elasticities using prodest package:
+
+
+``` {r, message = FALSE, warning = FALSE}
+library(prodest)
+
+LP_model1 <- prodestLP(data.nm.lp$y2, 
+                      fX = data.nm.lp$l,
+                      sX = data.nm.lp$k,
+                      pX = data.nm.lp$m, 
+                      idvar = data.nm.lp$firm,
+                      timevar = data.nm.lp$year, 
+                      R = 30)
+
+LP_model1
+```
+
+``` {r, message = FALSE, warning = FALSE}
+
+OP_model <- prodestOP(data.nm$y, 
+                      fX = data.nm$l,
+                      sX = data.nm$k,
+                      pX = data.nm$i, 
+                      cX = NULL,
+                      idvar = data.nm$firm, 
+                      timevar = data.nm$year)
+
+OP_model
+
+```
+Ques 5: ACF method:
+
+
+``` {r, message = FALSE, warning = FALSE}
+
+ACF_model <- prodestACF(data.nm.lp$y2, 
+                      fX = data.nm.lp$l,
+                      sX = data.nm.lp$k,
+                      pX = data.nm.lp$m, 
+                      idvar = data.nm.lp$firm, 
+                      timevar = data.nm.lp$year, 
+                      R = 20, cX = NULL, opt = "optim", theta0 = NULL, cluster = NULL)
+
+ACF_model
+betaI_acf <- 1.021
+betaK_acf <- 0.219
+```
+They suggest an apporach that does not suffer from the functional dependence problems and produces consistent estimates under alternative data generating processes for which the original procedures do not. They propose a similar approach, but invert an intermediate input demand function instead of an investment demand function to control for the unobserved productivity shock. They change the assumption that l_it and m_it are chosen with the same information set. The main difference between ACF approach and OP and LP is that in ACF approach, we invert "conditional" rather than "unconditional" input demand functions to control for unobserved productivity. This results in a fïrst stage that does not identify the coe¢ cients on variable inputs (e.g. labor). Instead, all coefficients are all estimated in the second stage. However, as we shall see, the fïrst stage will still be important to 'net out ́the untransmitted error epsilon_it from the production function. they consider a ̈value added ́production function in the sense that the intermediate input m_it does not enter the production function to be estimated. One interpretation of this is that the gross output production function is Leontief in the intermediate input, where this intermediate input is proportional to output.
+
+
+Ques 6: Dynamic Panel Data methods
+
+- done in stata(code attached)
+
+- estimated alphaL = 0.94 , alphaK = 0.37
+
+The dynamic panel (DP) literature essentially extends the fixed effects literature to allow for more sophisticated error structures. The DP approach does not need the assumptions that generate invertibility of the variable input demand function. So, e.g., it can allow for unobserved cost shocks to all inputs, unlike ACF approach, which does not allow such shocks to the price of m_it. On the other hand, the DP derivation seems to rely on the linearity of the omega_it process - in contrast, OP, LP, and ACF approach can treat the fïrst-order markov process completely non-parametrically. There are other differences between the models. For example, the DP literature can be extended to allow for a fixed effect alpha_i in addition to the AR(1) process, while generally speaking, this is challenging in ACF context because it would tend to violate the scalar unobservable assumption. The DP literature can also potentially allow future values of the intermediate input or investment variable to depend on past eplsilon_itís, while ACF approach cannot. On the other hand, as elaborated on in OP, the scalar unobservable assumption of OP/LP and ACF approach makes it fairly straightforward to extend the methodologies to address endogenous exit (selection) from a sample - this would be considerably harder in the DP context. In summary, both approaches require strong (but di§erent) assumptions. In some cases, a-priori beliefs about a particular production process and/or data considerations may guide choices between the two approaches. In other cases, one may want to try both techniques. Finding that estimates are consistent across multiple techniques with different assumptions is surely more convincing than only using one.
+
+```{r, message = FALSE, warning = FALSE}
+
+
+final <- rbind(c(0.89, 0.26), c(0.56, 0.9),c(0.86, 0.28),c(0.43, 0.19), c(1.021, 0.219), c(0.95, 0.37))
+colnames(final) <- c("alphaL", "alphaK")
+rownames(final) <- c("OLS", "OLS-FE", "OP", "LP", "ACF", "DP")
+final
+
+```
+
+Ques 7: Markups
+
+Average markups over time and their relation to export status:
+
+``` {r, message = FALSE, warning = FALSE}
+l_share <- data$wages/data$routput
+year <- data$year
+export <- data$exports
+markup_acf <- betaI_acf/l_share
+
+mydata <- data.frame(year, markup_acf, export)
+mydata <- mydata[order(year),]
+mydata <- mydata[ !is.na(markup_acf)  & !is.nan(markup_acf) & !is.infinite(markup_acf)  , ]
+
+
+mydata <- mydata[is.finite(rowSums(mydata)),]
+avgMarkup_acf <- mydata %>% 
+  group_by(year) %>% 
+  summarise(average = mean(markup_acf))
+
+
+
+#ggplot(avgMarkup_acf, aes(x = unique(year))) + geom_point(aes(y = average),color = 'red') + xlim(1991,2002) + ylim(0,22)
+
+plot(avgMarkup_acf$year, avgMarkup_acf$average, xlab = "Years", ylab = "Average Markup", main  = "Average Markup over time", color = "red")
+
+markup_reg <- lm(markup_acf ~ export, data = mydata)
+summ(markup_reg)
+```
+We estimate the average markups over time using the production approach and their relation with export status is given by the regression above.
+
+
+Ques 8: Selection
+
+The theoretical models, such as Bernard et al. (2003) and Melitz and Ottaviano (2008), emphasize the self-selection of firms into export markets based on an underlying productivity distribution, creating a strong correlation between productivity and export status. For given data, we check whether mean productivity is different for exporters versus non-exporters, which is significantly different points to the selection problem, not otherwise.
+
+
+
+
